@@ -13,7 +13,6 @@ from enum import IntEnum
 class LogLevel(IntEnum):
     pass  # TODO: DEBUG < INFO < WARN < ERROR < FATAL
 
-
 # ============================================================
 # TODO 2: Formatter interface + at least one layout impl.
 # ============================================================

@@ -13,14 +13,12 @@
 # find the nearest station with free dock for dropping the bike.
 # )
 #   different strategy can be used to pick the bike or drop the bike
-
-
 import math
 import threading
 from itertools import count
 from enum import Enum
 from abc import ABC , abstractmethod
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict,Callable
 
 
 
@@ -64,13 +62,6 @@ class Dock:
         if self._bike is not None:
             raise ValueError(f" doc {self.dock_id} already occupied")
     
-
-
-_STATION_CAPACITY = {
-    1 : 100,
-    2 : 10,
-    3 : 20,
-}
 
 class Station:
     def __init__(
@@ -156,34 +147,35 @@ class FakeClock(Clock):
 # user want to find the nearest station with free dock to drop the bike
 class StationSelectionStrategy(ABC):
     @abstractmethod
-    def find_station(self, bike: Bike):
+    def select(
+        self, 
+        stations: List[Station], 
+        origin: Tuple[float, float], 
+        is_eligible: Callable[[Station], bool]
+    ) -> Optional[Station]:
         ...
 
 class NearestSelectionStrategy(StationSelectionStrategy):
-    def __init__(self, stations : list) :
-        self.stations = stations
-
-    
-    def _get_nearest_location(self, nearest: Station, station: Station) -> Station:
-        if nearest.location > station.location:
-            return station
-        else:
-            return nearest
-
-
-    def find_station(self, bike: Bike) -> Station:
-        nearest: Station = None
-        for station in self.stations:
-            for dock in station.dock_list:
-                if dock.is_dock_free(bike.bike_type) or not nearest:
-                    nearest = self._get_nearest_location(nearest, station)
-
+    def select(self, stations, origin, is_eligible) -> Optional[Station]:
+        best : Optional[Station] = None
+        best_dist = math.inf
+        for station in stations:
+            if not is_eligible(station):
+                continue
+            d = self._dist(origin, station.location)
+            if d < best_dist:
+                best = station
+                best_dist = d
         
-        return nearest
+        return best
 
+    def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        return (a[0] - b[0]) ** 2 +  (a[1] - b[1]) ** 2
+    
+    
 
 def _minutes(trip: Trip, end_time: int) -> int:
-    return end_time - trip.start
+    return end_time - trip.start_time
 
 class PricingStrategy(ABC):
     @abstractmethod
@@ -195,36 +187,27 @@ class FlatPerMinutePricing(PricingStrategy):
         self._rate = rate_per_minutes
 
     def calculate_fee(self, trip: Trip, end_time: int) -> float:
-        return _minutes(trip=trip, end_time=end_time) * 
-
+        return _minutes(trip=trip, end_time=end_time) * self._rate[trip.bike.bike_type]
+    
 class TiredPricing(PricingStrategy):
 
     def __int__(
             self, 
-            clock : Clock,
-            first_hour_rates: dict = {}, 
-            next_hour_rates: dict = {},    
+            free_minutes: int,
+            rate_per_minutes: Dict[BikeType]
         ):
-        self._first_hour = first_hour_rates
-        self._next_hour = next_hour_rates
-        self._clock = clock
+        self._free = free_minutes
+        self._rate = rate_per_minutes
 
-    def calculate_fee(self, trip: Trip) -> float:
-        if trip._start_time < self._clock.now():
-            raise ValueError("invalid start time of trip")
-        start_time = trip._start_time
-        exit_time = self._clock.now()
-
-        total_hours = math.Max(1.0, (exit_time - start_time) / 60)
-        fee = self._first_hour[trip.bike_type]
-        if total_hours > 1:
-            fee += (total_hours - 1) * self._next_hour[trip.bike_type]
-
-        return fee
-    
+    def calculate_fee(self, trip: Trip, end_time: int) -> float:
+        if end_time < trip.start_time:
+            raise ValueError("invalid end time")
+        
+        billable = max(0, _minutes(trip=trip, end_time=end_time) - self._free)
+        return billable * self._rate[trip.bike.bike_type]
 
 
-class BikeStationService:
+class BikeShareService:
 
     def __int__(
         self,
@@ -234,86 +217,166 @@ class BikeStationService:
         pricing_svc: PricingStrategy,
     ):
         self.stations = stations
-        self._booked_list: dict = {}
-        self._lock = threading.Lock()
-        self._cnt = count(1)
         self._clock = clock
         self._station_selection_svc = station_selection_svc
         self._pricing_svc = pricing_svc
 
-    # user went to a particular location book picking the bike
-    def book_bike(
-            self, 
-            stataion: Station,
-            bike_type : Optional[BikeType] = None
-        ) -> Optional[Trip]: #Ticket
-        with self._lock:
-            if bike_type:
-                for dock in stataion.dock_list:
-                    if dock.is_bike_free(bike_type=bike_type):
-                        trip = Trip(
-                            trip_id=f"trip-{next(self._cnt)}",
-                            bike_type=bike_type,
-                            start_station=stataion,
-                            start_time=self._clock.now()
-                        )
-
-                        bike = Bike(
-                            bike_id=f"bike-{next(self._cnt)}"
-                            bike_type=bike_type
-                        )
-                        
-                        dock.occupy()
-                        # kind of db save (in-memory for now)
-                        self._booked_list[trip.trip_id] = trip
-
-                        return trip
-
-                raise ValueError(f"bike not available at this stations of type {bike_type}")
-            else:
-                # book any avalable bike the the given station
-                for doc in stataion.dock_list:
-                    if doc.is_dock_free():
-                        trip = Trip(
-                            trip_id=f"trip-{next(self._cnt)}",
-                            bike_type=bike_type,
-                            start_station=stataion,
-                            start_time=self._clock.now()
-                        )
-                        
-                        bike = Bike(
-                            bike_id=f"bike-{next(self._cnt)}"
-                            bike_type=bike_type
-                        )
-
-                        dock.occupy()
-                        self._booked_list[trip.trip_id] = trip
-
-                        return trip
-                    
-        return None
-
-    def drop_bike(self, trip: Trip '''Ticket''') -> float: #fee
-        # find the nearest available station
-        with self._lock:
-            station = self._station_selection_svc.find_station(bike=bike)
-            if not station:
-                raise ValueError(f"No doc availabe at the nearest station")
-            
-            trip = self._booked_list[trip.trip_id]
-            if not trip:
-                raise ValueError("Invaid trip")
-            
-            trip._drop_time = self._clock.now()
-            trip._fee = self._pricing_svc.calculate_fee(trip=trip)
-
-            del self._booked_list[trip.trip_id]
+        self._active: Dict = {}
+        self._trip_seq: int = count(1)
+        self._lock = threading.Lock()
 
     
+    def rent_bike(self, station:Station, bike_type: BikeType) -> Optional[Trip]:
+        with self._lock:
+            if not station.has_bike(bike_type=bike_type):
+                raise ValueError(f"Station {station.station_name} has no free bike")
+            
+            dock = station.find_dock_with_bike(bike_type=bike_type)
+            bike = dock.release_bike()
+
+            trip = Trip(
+                trip_id=f"trip-f{next(self._trip_seq)}",
+                bike=bike,
+                start_station=station,
+                start_time=self._clock.now()
+            )
+
+            self._active[trip.trip_id] = trip
+
+            return trip
+
+    def rent_bike(
+            self, 
+            station:Station, 
+            origin: Tuple[float, float],
+        ) -> Optional[Trip]:
+        with self._lock:
+            if not station.has_free_dock():
+                raise ValueError(f"Station {station.station_name} has not free dock")
+            
+            dock = station.find_free_dock()
+            bike = dock.release_bike()
+
+            trip = Trip(
+                trip_id=f"trip-{next(self._trip_seq)}",
+                bike=bike,
+                start_station=station,
+                start_time=self._clock.now()
+            )
+
+            self._active[trip.trip_id] = trip
+            return trip
+    
+    # rent bike find the nearest pickup station only provided the user location
+    def rent_bike():
+        pass
+
+    def return_bike(self, trip: Trip, station:Station) -> float:
+        with self._lock:
+            if self._active.get(trip.trip_id) is None:
+                raise ValueError("Invalid trip")
+            
+            fee = self._pricing_svc.calculate_fee(trip=trip, end_time=self._clock.now())
+            trip.fee = fee
+            trip.end_station = station
+            trip.end_time = self._clock.now()
+
+            dock = station.find_free_dock()
+            if not dock:
+                raise ValueError(f" No Dock free at this station")
+            dock.doc_bike()
+
+            del self._active[trip.trip_id]
+
+            return fee
+        
+    # drop bike at nearest available station with free dock , only provided user location.
+    def return_bike():
+        pass
+
+    def nearest_return_station(self, origin:Tuple[float, float]) -> Optional[Station]:
+        return self._station_selection_svc.select(
+            stations=self.stations,
+            origin=origin,
+            is_eligible= lambda s: s.has_free_dock()
+        )
+
+    def nearest_pickup_station(self, origin:Tuple[float, float], bike_type: Optional[BikeType])-> Optional[Station]:
+        if bike_type:
+            def bike_available(station: Station) -> bool:
+                return station.has_bike(bike_type=bike_type)
+            
+            station = self._station_selection_svc.select(
+                stations=self.stations, 
+                origin=origin,
+                is_eligible=bike_available
+            )
+        else:
+            def bike_available(station: Station) -> bool:
+                return station.has_free_dock()
+            
+            station = self._station_selection_svc.select(
+                stations=self.stations,
+                origin=origin,
+                is_eligible=bike_available,
+
+            )
+
+        return station
+    
+def build_stations() -> List[Station]:
+    a = Station("A", "Station-A", (0.0, 0.0), [
+        Dock("A1", Bike("b1", BikeType.STANDARD)),
+        Dock("A2", Bike("b2", BikeType.STANDARD)),
+        Dock("A3"),                                    
+    ])
+    b = Station("B", "Station-B", (3.0, 4.0), [
+        Dock("B1", Bike("b3", BikeType.ELECTRIC)),
+        Dock("B2", Bike("b4", BikeType.CARGO)),
+        Dock("B3"),                                    
+    ])
+    c = Station("C", "Station-C", (1.0, 1.0), [
+        Dock("C1"), Dock("C2"),                        
+        Dock("C3", Bike("b5", BikeType.STANDARD)),
+    ])
+    return [a, b, c]
 
 def main():
-    pass
 
+    clock = FakeClock(start=0)
+    stations = build_stations()
+    by_id = {s.station_id: s for s in stations}
 
+    service = BikeShareService(
+        stations=stations,
+        clock=clock,
+        pricing=TiredPricing(
+            free_minutes=10,
+            rate_per_minute={BikeType.STANDARD: 200, BikeType.ELECTRIC: 500, BikeType.CARGO: 800},
+        ),
+        selection=NearestSelectionStrategy(),
+    )
 
-        
+    print("Initial availability:")
+    for name, info in service.system_availability().items():
+        print(f"  {name}: {info}")
+
+    t1 = service.rent_bike(by_id["A"], BikeType.STANDARD)
+    t2 = service.rent_bike(by_id["B"], BikeType.ELECTRIC)
+    print(f"\nRented:\n  {t1}\n  {t2}")
+
+    t3 = service.rent_bike(by_id["A"], BikeType.CARGO)
+    print(f"\nRent CARGO at A -> {t3}   (None = no compatible bike, handled gracefully)")
+
+    clock.advance(22)                                   # 22-minute ride
+    rider_pos = (1.0, 1.0)
+    dest = service.nearest_return_station(rider_pos)
+    print(f"\nNearest free-dock station from {rider_pos}: {dest.name}")
+    fee = service.return_bike(t1, dest)
+    print(f"Returned {t1.bike} at {dest.name} after 22m -> fare {fee} paise (₹{fee/100:.2f})")
+
+    print("\nFinal availability:")
+
+    for name, info in service.system_availability().items():
+        print(f"  {name}: {info}")
+
