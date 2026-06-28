@@ -263,12 +263,12 @@ class ParkingLot:
             return ticket
 
     def unpark(self, ticket: Ticket) -> float:
-        with self._locak:
-            ticket = self._active_tickets[ticket.ticket_number]
+        with self._lock:
+            ticket = self._active_tickets.get(ticket.ticket_number)
             if not ticket:
                 raise ValueError(" known ticket number ")
             
-            exit_time = self._lock.now()
+            exit_time = self._clock.now()
             fee = self.pricing_svc.calculate_fee(ticket=ticket, exit_time=exit_time)
             ticket.exit_time = exit_time
             ticket.fee = fee
