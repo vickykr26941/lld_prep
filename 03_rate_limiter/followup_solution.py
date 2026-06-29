@@ -13,10 +13,9 @@ from enum import Enum
 from typing import Any, Callable
 
 
-# ----------------------------- clock -----------------------------
 class Clock(ABC):
     @abstractmethod
-    def now(self) -> float:        # seconds, monotonic
+    def now(self) -> float:
         ...
 
 class MonotonicClock(Clock):
@@ -32,7 +31,6 @@ class FakeClock(Clock):
         self._t += seconds
 
 
-# ----------------------------- domain -----------------------------
 class CircuitState(Enum):
     CLOSED = "closed"
     OPEN = "open"
@@ -40,10 +38,8 @@ class CircuitState(Enum):
 
 
 class CircuitOpenError(Exception):
-    """Raised when a call is rejected fast because the breaker is OPEN/HALF_OPEN-saturated."""
+   "Circuit breaker error"
 
-
-# ----------------------------- trip strategy (when to open) -----------------------------
 class TripStrategy(ABC):
     @abstractmethod
     def record_success(self) -> None: ...
@@ -112,7 +108,6 @@ class FailureRateStrategy(TripStrategy):
         self._events.clear()
 
 
-# ----------------------------- state pattern -----------------------------
 class BreakerState(ABC):
     @property
     @abstractmethod
@@ -154,12 +149,12 @@ class OpenState(BreakerState):
     def before_call(self, breaker: "CircuitBreaker") -> None:
         if breaker.cooldown_elapsed():
             breaker.to_half_open()
-            breaker.state.before_call(breaker)   # let HALF_OPEN consume a trial slot for this call
+            breaker.state.before_call(breaker)   
         else:
             raise CircuitOpenError(f"circuit '{breaker.name}' is OPEN")
 
     def on_success(self, breaker: "CircuitBreaker") -> None:
-        pass  # unreachable: no calls execute while OPEN
+        pass  
 
     def on_failure(self, breaker: "CircuitBreaker") -> None:
         pass
@@ -182,16 +177,14 @@ class HalfOpenState(BreakerState):
             breaker.to_closed()
 
     def on_failure(self, breaker: "CircuitBreaker") -> None:
-        breaker.trip_open()   # one failure re-opens; cooldown restarts
+        breaker.trip_open()  
 
 
-# states hold no data -> share singletons
 _CLOSED = ClosedState()
 _OPEN = OpenState()
 _HALF_OPEN = HalfOpenState()
 
 
-# ----------------------------- context -----------------------------
 class CircuitBreaker:
     def __init__(self, name: str, clock: Clock, trip_strategy: TripStrategy,
                  cooldown_seconds: float, half_open_max_calls: int = 1, success_threshold: int = 1):
@@ -216,10 +209,10 @@ class CircuitBreaker:
         return self._state
 
     def execute(self, fn: Callable, *args, **kwargs) -> Any:
-        with self._lock:                          # gate (may raise / transition)
+        with self._lock:                        
             self._state.before_call(self)
         try:
-            result = fn(*args, **kwargs)          # downstream call OUTSIDE the lock
+            result = fn(*args, **kwargs)     
         except Exception:
             with self._lock:
                 self._total_failure += 1
@@ -231,7 +224,6 @@ class CircuitBreaker:
                 self._state.on_success(self)
             return result
 
-    # ---- transitions (always called while holding the lock) ----
     def trip_open(self) -> None:
         self._opened_at = self._clock.now()
         self._set_state(_OPEN)
@@ -253,7 +245,6 @@ class CircuitBreaker:
             self._state = state
             self._last_state_change = self._clock.now()
 
-    # ---- helpers used by the states ----
     def cooldown_elapsed(self) -> bool:
         return (self._clock.now() - self._opened_at) >= self.cooldown_seconds
 
@@ -272,8 +263,6 @@ class CircuitBreaker:
             "last_state_change": self._last_state_change,
         }
 
-
-# ----------------------------- optional: per-dependency registry -----------------------------
 class CircuitBreakerRegistry:
     """Lazily creates/returns one breaker per dependency name (independent state)."""
     def __init__(self, factory: Callable[[str], CircuitBreaker]):
@@ -288,7 +277,6 @@ class CircuitBreakerRegistry:
             return self._breakers[name]
 
 
-# ----------------------------- driver -----------------------------
 class FlakyService:
     """A controllable downstream so the demo is deterministic."""
     def __init__(self):
@@ -346,7 +334,7 @@ def main() -> None:
     print(f"  state after 3 fresh failures = {cb.metrics()['state']}")
     clock.advance(5)
     try:
-        call()                     # half-open trial, fails
+        call()            
     except RuntimeError:
         pass
     print(f"  state after failed trial = {cb.metrics()['state']}")
