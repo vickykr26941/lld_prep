@@ -36,3 +36,5 @@ Design a fixed-capacity in-memory cache with **O(1)** get/put and a **pluggable 
 - [ ] `Cache` facade wiring capacity + policy + storage
 - [ ] Thread-safety + (optional) TTL with injectable clock
 - [ ] `main()` driver covering the scenario above
+
+
