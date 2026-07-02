@@ -126,19 +126,7 @@ class Elevator:
         return len(self.up_stops) > 0 or len(self.down_stops) > 0 
     
     def snapshot(self):
-        return (
-            self.elevator_id,
-            self.num_floors,
-            self.current_floor,
-            self.state, 
-            self.direction,
-            self.up_stops,
-            self.down_stops,
-            self.capacity,
-            self.door_open_ticks,
-
-            self.door_timer_counter
-        )
+        return (self.elevator_id, self.current_floor, self.state, self.direction)
     
     def step(self):
         if self.state == ElevatorState.DOORS_OPEN:
@@ -157,15 +145,17 @@ class Elevator:
             if target is None:
                 self._decide_next_direction()
                 return
-            
+
             if self.current_floor == target:
                 self._arrive_up()
             else:
-                self.current_floor += 1
+                # move TOWARD the target: the lowest up-stop may be below us
+                # (wrong-side hall call) — approach it, then sweep up
+                self.current_floor += 1 if target > self.current_floor else -1
                 if self.current_floor == target:
                     self._arrive_up()
             return
-        
+
         if self.state == ElevatorState.MOVING_DOWN:
             target = self._peek_down()
             if target is None:
@@ -174,9 +164,9 @@ class Elevator:
 
             if self.current_floor == target:
                 self._arrive_down()
-    
-            elif self.current_floor > 0:
-                self.current_floor -= 1
+            else:
+                # highest down-stop may be ABOVE us — climb to it, then sweep down
+                self.current_floor += 1 if target > self.current_floor else -1
                 if self.current_floor == target:
                     self._arrive_down()
             return
@@ -328,26 +318,121 @@ class LookDispatchStrategy(BaseDispatchStrategy):
 
             return abs(e.current_floor - turn) + abs(turn - call.floor)
         
-# ============================================================
-# TODO 5: ElevatorController — registers hall/car calls, runs dispatch,
-#         and exposes tick() to advance the whole simulation one unit.
-# ============================================================
 class ElevatorController:
-    def __init__(self, num_floors: int, num_elevators: int, strategy: DispatchStrategy) -> None:
-        self.num_floors = num_elevators
-        self.num_elevators = num_elevators
-        self.service = strategy
+  
+    def __init__(self, num_floors: int, num_elevators: int, strategy: DispatchStrategy,
+                 door_open_ticks: int = 1) -> None:
+        self.num_floors = num_floors
+        self.strategy = strategy
+        self._elevators = {
+            f"E{i + 1}": Elevator(f"E{i + 1}", num_floors, door_open_ticks=door_open_ticks)
+            for i in range(num_elevators)
+        }
 
-    def register_request(self, ):
-        pass
+    @property
+    def elevators(self) -> List[Elevator]:
+        return list(self._elevators.values())
 
-    def tick(self):
-        pass
+    def request_hall_call(self, floor: int, direction: Direction) -> Optional[str]:
+        self._validate_floor(floor)
+        call = HallCall(floor, direction)
+        chosen = self.strategy.select_elevator(self.elevators, call)
+        if chosen is None:
+            return None
+        chosen.add_hall_call(call)
+        return chosen.elevator_id
+
+    def request_car_call(self, elevator_id: str, target_floor: int) -> None:
+        self._validate_floor(target_floor)
+        if elevator_id not in self._elevators:
+            raise ValueError(f"unknown elevator: {elevator_id}")
+        self._elevators[elevator_id].add_car_call(target_floor)
+
+    def tick(self) -> List[tuple]:
+        for e in self.elevators:
+            e.step()
+        return [e.snapshot() for e in self.elevators]
+
+    def all_idle(self) -> bool:
+        return all(
+            e.state == ElevatorState.IDLE and not e._has_pending()
+            for e in self.elevators
+        )
+
+    def _validate_floor(self, floor: int) -> None:
+        if not (0 <= floor < self.num_floors):
+            raise ValueError(f"floor {floor} out of range [0, {self.num_floors - 1}]")
+
+
+def _run_and_trace(controller: ElevatorController, max_ticks: int = 40) -> None:
+    t = 0
+    while not controller.all_idle() and t < max_ticks:
+        line = "  ".join(
+            f"{eid}: floor={fl} {st.value:<11} dir={d.value}"
+            for eid, fl, st, d in controller.tick()
+        )
+        print(f"  tick {t:>2} | {line}")
+        t += 1
+
+
+def _print_costs(strategy: BaseDispatchStrategy, elevators: List[Elevator], call: HallCall) -> None:
+    costs = ", ".join(f"{e.elevator_id}={strategy._cost(e=e, call=call)}" for e in elevators)
+    print(f"  costs for (floor={call.floor}, {call.direction.value}): {costs}")
 
 
 def main() -> None:
-    """Driver — see README 'Driver scenario'. TODO: implement the per-tick trace."""
-    raise NotImplementedError("Run the 10-floor / 2-elevator scenario, printing each tick.")
+    print("=" * 70)
+    print("SCENARIO A: NearestDispatchStrategy — 10 floors, 2 elevators at 0")
+    print("=" * 70)
+    strategy = NearestDispatchStrategy()
+    c = ElevatorController(num_floors=10, num_elevators=2, strategy=strategy)
+
+
+    call = HallCall(5, Direction.UP)
+    _print_costs(strategy, c.elevators, call)
+    chosen = c.request_hall_call(5, Direction.UP)
+    print(f"  hall call (5, up) -> assigned to {chosen} (lowest cost, tie -> first)")
+
+    # 2) rider inside that elevator presses floor 9
+    c.request_car_call(chosen, 9)
+    print(f"  car call: rider in {chosen} presses 9")
+
+    # 3) hall call: floor 3 DOWN -> should go to the other (idle) elevator
+    call2 = HallCall(3, Direction.DOWN)
+    _print_costs(strategy, c.elevators, call2)
+    chosen2 = c.request_hall_call(3, Direction.DOWN)
+    print(f"  hall call (3, down) -> assigned to {chosen2}")
+
+    # 4) run the sim, tracing every tick
+    _run_and_trace(c)
+
+    print()
+    print("=" * 70)
+    print("SCENARIO B: LookDispatchStrategy — in-path stop served in sweep order")
+    print("=" * 70)
+    look = LookDispatchStrategy()
+    c2 = ElevatorController(num_floors=10, num_elevators=2, strategy=look)
+
+    # E1 is sent sweeping up with stops at 4 and 8
+    c2.request_car_call("E1", 4)
+    c2.request_car_call("E1", 8)
+    for _ in range(3):          # let E1 get moving (reaches floor ~2)
+        c2.tick()
+
+    # mid-sweep hall call at floor 6 UP: LOOK sees E1 passes floor 6 -> in-path pickup
+    call3 = HallCall(6, Direction.UP)
+    _print_costs(look, c2.elevators, call3)
+    chosen3 = c2.request_hall_call(6, Direction.UP)
+    print(f"  hall call (6, up) mid-sweep -> assigned to {chosen3} "
+          f"(E1 serves 4, 6, 8 IN ORDER on one sweep)")
+
+    # a DOWN call at floor 2 would force E1 to finish+reverse -> idle E2 is cheaper
+    call4 = HallCall(2, Direction.DOWN)
+    _print_costs(look, c2.elevators, call4)
+    chosen4 = c2.request_hall_call(2, Direction.DOWN)
+    print(f"  hall call (2, down) -> assigned to {chosen4} (idle car beats finish-and-reverse)")
+
+    _run_and_trace(c2)
 
 
 if __name__ == "__main__":
